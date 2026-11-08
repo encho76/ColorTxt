@@ -42,6 +42,7 @@ import indentIcon from "./assets/indent.svg?raw";
 import updateIcon from "./assets/update.svg?raw";
 import devToolsIcon from "./assets/DevTools.svg?raw";
 import settingIcon from "./assets/setting.svg?raw";
+import dualColumnIcon from "./assets/two_column.svg?raw";
 import advancedWrappingIcon from "./assets/advanced_wrapping.svg?raw";
 import pinIcon from "./assets/pin.svg?raw";
 import pinActiveIcon from "./assets/pin_active.svg?raw";
@@ -144,6 +145,8 @@ export const speakIconAnimFrames = [
 ] as const;
 
 export const icons = {
+  /** 双栏阅读：左右两栏连续显示正文 */
+  dualColumn: dualColumnIcon,
   dark: darkIcon,
   light: lightIcon,
   sidebar: sidebarIcon,

@@ -27,6 +27,7 @@ import {
   setReaderSyntaxHighlightEnabled,
 } from "../monaco/readerInlineDecorations";
 import { useReaderInlineSearch } from "../composables/useReaderInlineSearch";
+import { readerDualColumn } from "../composables/useReaderColumnMode";
 import {
   replaceImgAnchorLinesWithViewZones,
   removeViewZonesById,
@@ -380,6 +381,11 @@ const editorEditContextMenuItems = computed(() => {
 });
 const editor = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 const model = shallowRef<monaco.editor.ITextModel | null>(null);
+/** 双栏阅读：右栏是与主栏共享同一 ITextModel 的只读镜像编辑器 */
+const secondaryEditor = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(
+  null,
+);
+const secondaryEditorEl = ref<HTMLDivElement | null>(null);
 /** 章节标题行内装饰（`buildChapterTitleDecorations` / `inlineClassName` 着色）；与 View Zone 留白无关 */
 const chapterTitleDecorationsCollection =
   shallowRef<monaco.editor.IEditorDecorationsCollection | null>(null);
@@ -4182,6 +4188,14 @@ function scrollByPageStep(direction: -1 | 1) {
   );
   const viewportHeight = Math.max(1, e.getLayoutInfo().height);
 
+  if (dualColumnActive.value) {
+    // 双栏：一次翻页跨两栏；按两屏步长滚动，绕开依赖单视口的对齐分支
+    scrollByDeltaY(
+      direction * Math.max(lineHeight, (viewportHeight - lineHeight) * 2),
+    );
+    return;
+  }
+
   if (direction > 0) {
     const lastPos = lastCompletelyVisibleModelPosition(e);
     if (lastPos) {
@@ -4487,6 +4501,106 @@ function emitReaderEditCursorStatus(fromEditor?: monaco.editor.ICodeEditor) {
   emit("readerEditCursorChange", payload);
 }
 
+/* ------------------------------------------------------------------ *
+ * 双栏阅读
+ * 主栏保留全部现有逻辑（进度、标注、朗读、搜索、书签都只认主栏）；
+ * 右栏共享同一 ITextModel，是只读镜像，视口接续左栏底部。
+ * 内容上色走 model 级 MonarchTokensProvider，两栏自动一致。
+ * ------------------------------------------------------------------ */
+const dualColumnActive = computed(
+  () =>
+    readerDualColumn.value &&
+    !props.readerEditMode &&
+    !smartFormatReviewActive.value &&
+    !voiceReadScrollLocked.value,
+);
+let dualColumnLayoutRaf: number | null = null;
+
+/** 复制主栏排版选项到右侧栏：折行位置一致，滚动偏移才准确 */
+function syncDualColumnTypography() {
+  const e = editor.value;
+  const s = secondaryEditor.value;
+  if (!e || !s) return;
+  s.updateOptions({
+    fontSize: e.getOption(monaco.editor.EditorOption.fontSize),
+    lineHeight: e.getOption(monaco.editor.EditorOption.lineHeight),
+    fontFamily: e.getOption(monaco.editor.EditorOption.fontFamily),
+    letterSpacing: e.getOption(monaco.editor.EditorOption.letterSpacing),
+    wordWrap: e.getOption(monaco.editor.EditorOption.wordWrap),
+  });
+}
+
+function ensureSecondaryEditor() {
+  const host = secondaryEditorEl.value;
+  const e = editor.value;
+  if (secondaryEditor.value || !host || !e) return;
+  const m = e.getModel() ?? model.value;
+  if (!m) return;
+  const s = monaco.editor.create(host, {
+    model: m,
+    ...buildReaderEditorCreateOptions({
+      fontSize: READER_EDITOR_DEFAULT_FONT_SIZE,
+      lineHeightMultiple,
+      letterSpacingPx: props.letterSpacingPx,
+      fontFamily: currentFontFamily,
+      theme: readerMonacoThemeForAppTheme(lastAppThemeName),
+      wrappingStrategyAdvanced: props.monacoAdvancedWrapping,
+      smoothScrolling: props.monacoSmoothScrolling,
+      mouseWheelScrollSensitivity: props.mouseWheelScrollSensitivity,
+      fastScrollSensitivity: props.fastScrollSensitivity,
+      stickyChapterTitleEnabled: false,
+    }),
+    ...buildReaderMonacoModeEditorOptions(
+      false,
+      false,
+      false,
+      props.readerFullscreen,
+    ),
+    /** 右栏不重复显示粘性标题，也不显示滚动条/概览尺 */
+    stickyScroll: { enabled: false },
+    scrollbar: { vertical: "hidden", horizontal: "hidden" },
+    overviewRulerLanes: 0,
+    overviewRulerBorder: false,
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+  });
+  secondaryEditor.value = s;
+  syncDualColumnTypography();
+}
+
+/** 主栏 → 右栏单向同步：右栏视口 = 主栏视口底部续接 */
+function syncDualColumnFromPrimary() {
+  const e = editor.value;
+  const s = secondaryEditor.value;
+  if (!dualColumnActive.value || !e || !s) return;
+  const target = e.getScrollTop() + Math.max(1, e.getLayoutInfo().height);
+  if (Math.abs(s.getScrollTop() - target) > 1) {
+    s.setScrollTop(target, monaco.editor.ScrollType.Immediate);
+  }
+}
+
+/** 右栏滚轮转发给主栏，再由主栏单向同步，避免两栏互相拉扯 */
+function onDualColumnWheel(event: WheelEvent) {
+  const e = editor.value;
+  if (!e) return;
+  e.setScrollTop(
+    e.getScrollTop() + event.deltaY,
+    monaco.editor.ScrollType.Immediate,
+  );
+}
+
+watch(dualColumnActive, (active) => {
+  if (active) ensureSecondaryEditor();
+  if (dualColumnLayoutRaf != null) cancelAnimationFrame(dualColumnLayoutRaf);
+  dualColumnLayoutRaf = requestAnimationFrame(() => {
+    dualColumnLayoutRaf = null;
+    editor.value?.layout();
+    secondaryEditor.value?.layout();
+    syncDualColumnTypography();
+    syncDualColumnFromPrimary();
+  });
+});
+
 function emitProbeLine(fromScroll = false) {
   const e = editor.value;
   if (!e) return;
@@ -4498,8 +4612,16 @@ function emitProbeLine(fromScroll = false) {
   const maxTop = Math.max(0, e.getScrollHeight() - e.getLayoutInfo().height);
   const scrollTop = Math.max(0, e.getScrollTop());
   const atBottom = maxTop <= 0 ? true : scrollTop >= maxTop - 1;
+  // 双栏：进度按「两栏合计可见内容」折算，避免已读到右栏时进度仍偏低
+  const dualViewport = dualColumnActive.value
+    ? Math.max(0, e.getLayoutInfo().height)
+    : 0;
   const percent =
-    maxTop <= 0 ? 100 : floorReadingPercentFromScrollRatio(scrollTop / maxTop);
+    maxTop <= 0
+      ? 100
+      : floorReadingPercentFromScrollRatio(
+          (scrollTop + dualViewport) / (maxTop + dualViewport),
+        );
   emit("probeLineChange", probeLine, fromReadingScroll, fromScroll);
   emit("viewportTopLineChange", startLine);
   emit("viewportEndLineChange", endLine);
@@ -4774,6 +4896,16 @@ onMounted(() => {
       emitProbeLine(true);
       flushReaderBackgroundStickyAlign();
       scheduleReadingRulerFollowViewport();
+      syncDualColumnFromPrimary();
+    });
+    /** 换书/重排会替换主栏 model，右栏须跟随同一个模型 */
+    const dDualModel = e.onDidChangeModel(() => {
+      const s = secondaryEditor.value;
+      const m = e.getModel();
+      if (s && m && s.getModel() !== m) s.setModel(m);
+    });
+    const dDualConfig = e.onDidChangeConfiguration(() => {
+      syncDualColumnTypography();
     });
     const dLayout = e.onDidLayoutChange(() => {
       flushReaderBackgroundStickyAlign();
@@ -4981,6 +5113,8 @@ onMounted(() => {
       disposeScrollbarTrackJumpGuard();
       d1.dispose();
       dLayout.dispose();
+      dDualModel.dispose();
+      dDualConfig.dispose();
       window.removeEventListener("resize", flushReaderBackgroundStickyAlign);
       d2.dispose();
       dSel.dispose();
@@ -5018,6 +5152,11 @@ onMounted(() => {
     syncMinimapCursorLineDecoration();
     syncChapterMinimapSectionHeaderDecorations();
     setupHorizontalInsetLayout();
+    if (dualColumnActive.value) {
+      ensureSecondaryEditor();
+      syncDualColumnTypography();
+      syncDualColumnFromPrimary();
+    }
   }
 });
 
@@ -5045,6 +5184,12 @@ onBeforeUnmount(() => {
   removeSelectionToolbarDigitKeyCapture?.();
   removeSelectionToolbarDigitKeyCapture = null;
   disposeAnnotationDecorations();
+  if (dualColumnLayoutRaf != null) {
+    cancelAnimationFrame(dualColumnLayoutRaf);
+    dualColumnLayoutRaf = null;
+  }
+  secondaryEditor.value?.dispose();
+  secondaryEditor.value = null;
   editor.value?.dispose();
   model.value?.dispose();
   disposeReaderMonacoOverflowHost();
@@ -5235,6 +5380,7 @@ watch(smartFormatReviewActive, (active) => {
       'content--clickMode': readerClickTurnPageActive,
       'content--hInset': horizontalInsetActive,
       'content--hInsetWindowPin': horizontalInsetWindowPin,
+      'content--dualColumn': dualColumnActive,
     }"
     :style="horizontalInsetStyle"
   >
@@ -5260,10 +5406,21 @@ watch(smartFormatReviewActive, (active) => {
         @apply="onSmartFormatReviewApply"
       />
       <div
-        ref="editorEl"
-        class="editorHost"
-        :class="{ 'editorHost--hidden': smartFormatReviewActive }"
-      ></div>
+        class="readerColumns"
+        :class="{ 'readerColumns--dual': dualColumnActive }"
+      >
+        <div
+          ref="editorEl"
+          class="editorHost editorHost--dualPrimary"
+          :class="{ 'editorHost--hidden': smartFormatReviewActive }"
+        ></div>
+        <div
+          ref="secondaryEditorEl"
+          class="editorHost editorHost--dualSecondary"
+          aria-label="双栏阅读右栏"
+          @wheel.capture.prevent.stop="onDualColumnWheel"
+        ></div>
+      </div>
       <div
         ref="diffHostEl"
         class="editorHost editorHost--diff"
@@ -5399,6 +5556,52 @@ watch(smartFormatReviewActive, (active) => {
   flex-direction: column;
 }
 
+/*
+ * 双栏阅读：两个 Monaco 宿主并排，共用同一个 ITextModel。
+ * 右栏只读、无滚动条，滚动由主栏单向驱动（见 syncDualColumnFromPrimary）。
+ */
+.readerColumns {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.readerColumns > .editorHost {
+  width: auto;
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.readerColumns > .editorHost--dualSecondary {
+  display: none;
+}
+
+.readerColumns--dual {
+  gap: 20px;
+}
+
+.readerColumns--dual > .editorHost--dualPrimary,
+.readerColumns--dual > .editorHost--dualSecondary {
+  flex: 1 1 50%;
+}
+
+.readerColumns--dual > .editorHost--dualSecondary {
+  display: block;
+  border-left: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+}
+
+/** 窄窗口降级为单栏，避免每栏过窄导致折行失控 */
+@media (max-width: 900px) {
+  .readerColumns--dual > .editorHost--dualPrimary {
+    flex: 1 1 100%;
+  }
+  .readerColumns--dual > .editorHost--dualSecondary {
+    display: none;
+  }
+}
+
 /** 左右边距：收窄 Monaco 宿主，换行随 automaticLayout 变窄 */
 .content.content--hInset .editorShell {
   padding-left: var(--reader-h-inset);
@@ -5438,6 +5641,19 @@ watch(smartFormatReviewActive, (active) => {
   top: var(--reader-sb-top, 0px) !important;
   height: var(--reader-sb-height, 100%) !important;
   z-index: 9;
+}
+
+/*
+ * 窗口模式固定竖条：双栏时右栏不参与，避免两份 fixed 装饰叠在窗格右缘。
+ * 主栏竖条仍钉在整个阅读窗格右缘，作为两栏合计进度的滚动条。
+ */
+.content--dualColumn.content--hInsetWindowPin
+  .editorHost--dualSecondary
+  :deep(.monaco-editor .monaco-scrollable-element > .scrollbar.vertical),
+.content--dualColumn.content--hInsetWindowPin
+  .editorHost--dualSecondary
+  :deep(.monaco-editor .decorationsOverviewRuler) {
+  display: none !important;
 }
 
 .editorShell--smartFormatReview .editorHost--diff {

@@ -8,6 +8,10 @@ import HeaderFormatToolbar from "./HeaderFormatToolbar.vue";
 import { useAppHeaderLayout } from "../composables/useAppHeaderLayout";
 import { icons } from "../icons";
 import {
+  readerDualColumn,
+  toggleReaderDualColumn,
+} from "../composables/useReaderColumnMode";
+import {
   readingRulerButtonTitle,
   readerClickModeButtonTitle,
   readerClickModeButtonTitleWithRuler,
@@ -282,6 +286,16 @@ const showFormatToolbarInMore = computed(() => compactFormatToolbar.value);
       aria-label="切换阅读尺"
       :disabled="voiceReadActive"
       @click="emit('toggleReadingRuler')"
+    />
+    <IconButton
+      v-if="!readerEditMode"
+      :icon-html="icons.dualColumn"
+      :active="readerDualColumn"
+      :pressed="readerDualColumn"
+      :title="readerDualColumn ? '关闭双栏阅读' : '开启双栏阅读'"
+      aria-label="切换双栏阅读"
+      :disabled="voiceReadActive"
+      @click="toggleReaderDualColumn"
     />
     <IconButton
       v-if="!readerEditMode"

@@ -59,6 +59,10 @@ import {
 import SettingsSelectionToolbarPreview from "./SettingsSelectionToolbarPreview.vue";
 import FontPicker from "./FontPicker.vue";
 import {
+  readerDualColumn,
+  setReaderDualColumn,
+} from "../composables/useReaderColumnMode";
+import {
   detectFontPickerSelection,
   getPresetLabel,
 } from "../utils/presetFontDefinitions";
@@ -293,6 +297,20 @@ const selectListsEmpty: CustomSelectItem[] = [];
             "
           />
         </div>
+      </div>
+
+      <div class="settingsRow">
+        <div class="settingsRowMain">
+          <span class="settingsLabel">双栏阅读</span>
+          <SwitchToggle
+            :model-value="readerDualColumn"
+            aria-label="双栏阅读"
+            @update:model-value="setReaderDualColumn"
+          />
+        </div>
+        <p class="settingsHint">
+          将正文分成左右两栏，右栏接续左栏底部内容，宽屏下可减少翻页。<br />窄窗口、编辑模式、智能排版预览与语音朗读时自动按单栏显示。
+        </p>
       </div>
     </div>
 
